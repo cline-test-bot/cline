@@ -6,6 +6,7 @@ import type {
 	AgentRuntimePlugin,
 	AgentTool,
 	ITelemetryService,
+	ToolApprovalRequest,
 } from "@cline/shared";
 import {
 	AGENT_UNEXPECTED_REASONING_TOKENS_EVENT,
@@ -2612,6 +2613,187 @@ describe("AgentRuntime", () => {
 		);
 		expect(toolMessages[0]?.content[0]).toMatchObject({ toolName: "slow" });
 		expect(toolMessages[1]?.content[0]).toMatchObject({ toolName: "fast" });
+	});
+
+	it("prepares parallel tool calls concurrently so a gated approval does not stall later subagents", async () => {
+		const events: string[] = [];
+		let markSecondStarted: () => void = () => undefined;
+		const secondStarted = new Promise<void>((resolve) => {
+			markSecondStarted = resolve;
+		});
+		// Guards against hanging if the fix regresses: the race resolves and the
+		// ordering assertions below fail instead of the test timing out.
+		const gateTimeout = new Promise<void>((resolve) => {
+			setTimeout(resolve, 1000);
+		});
+
+		const spawnAgent: AgentTool<{ agent: string }, { agent: string }> = {
+			name: "spawn_agent",
+			description: "Spawn a subagent",
+			inputSchema: { type: "object" },
+			async execute(input) {
+				events.push(`execute-start:${input.agent}`);
+				if (input.agent === "second") {
+					markSecondStarted();
+				}
+				events.push(`execute-end:${input.agent}`);
+				return { agent: input.agent };
+			},
+		};
+
+		const requestToolApproval = vi.fn(
+			async ({ toolCallId }: ToolApprovalRequest) => {
+				events.push(`approval-start:${toolCallId}`);
+				if (toolCallId === "spawn_first") {
+					// Only released once the second spawn_agent call has begun,
+					// which can only happen if preparation runs concurrently.
+					await Promise.race([secondStarted, gateTimeout]);
+				}
+				events.push(`approval-end:${toolCallId}`);
+				return { approved: true };
+			},
+		);
+
+		const model = new ScriptedModel([
+			() => [
+				{
+					type: "tool-call-delta",
+					toolCallId: "spawn_first",
+					toolName: "spawn_agent",
+					inputText: '{"agent":"first"}',
+				},
+				{
+					type: "tool-call-delta",
+					toolCallId: "spawn_second",
+					toolName: "spawn_agent",
+					inputText: '{"agent":"second"}',
+				},
+				{ type: "finish", reason: "tool-calls" },
+			],
+			() => [
+				{ type: "text-delta", text: "spawned" },
+				{ type: "finish", reason: "stop" },
+			],
+		]);
+
+		const runtime = new AgentRuntime({
+			model,
+			tools: [spawnAgent as AgentTool],
+			toolExecution: "parallel",
+			toolPolicies: { "*": { autoApprove: false } },
+			requestToolApproval,
+		});
+
+		const result = await runtime.run("Spawn two subagents");
+
+		expect(result.status).toBe("completed");
+		expect(result.outputText).toBe("spawned");
+
+		// Both approvals are requested before the first one resolves.
+		expect(events.indexOf("approval-start:spawn_second")).toBeLessThan(
+			events.indexOf("approval-end:spawn_first"),
+		);
+		// The second subagent runs to completion while the first is still gated.
+		expect(events.indexOf("execute-end:second")).toBeLessThan(
+			events.indexOf("approval-end:spawn_first"),
+		);
+		expect(events.indexOf("execute-start:second")).toBeLessThan(
+			events.indexOf("execute-start:first"),
+		);
+
+		// Ordering of appended messages still follows tool-call order.
+		const toolMessages = result.messages.filter(
+			(message) => message.role === "tool",
+		);
+		expect(toolMessages).toHaveLength(2);
+		expect(toolMessages[0]?.content[0]).toMatchObject({
+			toolCallId: "spawn_first",
+			output: { agent: "first" },
+		});
+		expect(toolMessages[1]?.content[0]).toMatchObject({
+			toolCallId: "spawn_second",
+			output: { agent: "second" },
+		});
+		const roles = result.messages.map((message) => message.role);
+		expect(roles).toEqual(["user", "assistant", "tool", "tool", "assistant"]);
+	});
+
+	it("keeps sequential tool execution serial across preparation and execution", async () => {
+		const events: string[] = [];
+		const spawnAgent: AgentTool<{ agent: string }, { agent: string }> = {
+			name: "spawn_agent",
+			description: "Spawn a subagent",
+			inputSchema: { type: "object" },
+			async execute(input) {
+				events.push(`execute-start:${input.agent}`);
+				await new Promise((resolve) => setTimeout(resolve, 5));
+				events.push(`execute-end:${input.agent}`);
+				return { agent: input.agent };
+			},
+		};
+
+		const requestToolApproval = vi.fn(
+			async ({ toolCallId }: ToolApprovalRequest) => {
+				events.push(`approval-start:${toolCallId}`);
+				await new Promise((resolve) => setTimeout(resolve, 5));
+				events.push(`approval-end:${toolCallId}`);
+				return { approved: true };
+			},
+		);
+
+		const model = new ScriptedModel([
+			() => [
+				{
+					type: "tool-call-delta",
+					toolCallId: "spawn_first",
+					toolName: "spawn_agent",
+					inputText: '{"agent":"first"}',
+				},
+				{
+					type: "tool-call-delta",
+					toolCallId: "spawn_second",
+					toolName: "spawn_agent",
+					inputText: '{"agent":"second"}',
+				},
+				{ type: "finish", reason: "tool-calls" },
+			],
+			() => [
+				{ type: "text-delta", text: "spawned" },
+				{ type: "finish", reason: "stop" },
+			],
+		]);
+
+		const runtime = new AgentRuntime({
+			model,
+			tools: [spawnAgent as AgentTool],
+			toolPolicies: { "*": { autoApprove: false } },
+			requestToolApproval,
+		});
+
+		const result = await runtime.run("Spawn two subagents");
+
+		expect(result.status).toBe("completed");
+		// Sequential mode still prepares every call before running any tool, and
+		// runs them one at a time.
+		expect(events).toEqual([
+			"approval-start:spawn_first",
+			"approval-end:spawn_first",
+			"approval-start:spawn_second",
+			"approval-end:spawn_second",
+			"execute-start:first",
+			"execute-end:first",
+			"execute-start:second",
+			"execute-end:second",
+		]);
+		const toolMessages = result.messages.filter(
+			(message) => message.role === "tool",
+		);
+		expect(toolMessages[0]?.content[0]).toMatchObject({
+			toolCallId: "spawn_first",
+		});
+		expect(toolMessages[1]?.content[0]).toMatchObject({
+			toolCallId: "spawn_second",
+		});
 	});
 
 	it("captures events, logger calls, telemetry, and failed tool runs", async () => {

@@ -1631,20 +1631,53 @@ export class AgentRuntime {
 		toolCalls: AgentToolCallPart[],
 	): Promise<AgentMessage[]> {
 		this.pendingHookContexts = [];
+
+		if (this.config.toolExecution === "parallel") {
+			return this.executeToolCallsInParallel(toolCalls);
+		}
+
 		const prepared: PreparedToolExecution[] = [];
 		for (const toolCall of toolCalls) {
 			prepared.push(await this.prepareToolExecution(toolCall));
 		}
 
-		if (this.config.toolExecution === "parallel") {
-			return Promise.all(
-				prepared.map((execution) => this.executePreparedTool(execution)),
-			);
-		}
-
 		const results: AgentMessage[] = [];
 		for (const execution of prepared) {
 			results.push(await this.executePreparedTool(execution));
+		}
+		return results;
+	}
+
+	/**
+	 * Prepare and execute each tool call in its own async chain.
+	 *
+	 * Preparation is asynchronous (beforeTool hooks, approval prompts), so
+	 * preparing every call up-front in a serial loop would make independent
+	 * calls — e.g. several `spawn_agent` calls in one assistant turn — start
+	 * one after another instead of together. Each call therefore owns a chain
+	 * of `prepare -> execute` and the chains are awaited together.
+	 *
+	 * Results keep tool-call order because each chain stays at its original
+	 * index. Failures are surfaced in tool-call order too, matching the
+	 * sequential path, and `allSettled` guarantees the sibling chains are
+	 * observed rather than becoming unhandled rejections.
+	 */
+	private async executeToolCallsInParallel(
+		toolCalls: AgentToolCallPart[],
+	): Promise<AgentMessage[]> {
+		const settled = await Promise.allSettled(
+			toolCalls.map(async (toolCall) => {
+				const prepared = await this.prepareToolExecution(toolCall);
+				return this.executePreparedTool(prepared);
+			}),
+		);
+
+		const results: AgentMessage[] = [];
+		for (const outcome of settled) {
+			if (outcome.status === "rejected") {
+				throw outcome.reason;
+			}
+			results.push(outcome.value);
 		}
 		return results;
 	}
