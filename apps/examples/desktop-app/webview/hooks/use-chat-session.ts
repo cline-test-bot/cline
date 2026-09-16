@@ -11,6 +11,7 @@ import {
 	extractAssistantTurnDataFromRpcMessages,
 	inferHydratedChatStatus,
 	makeId,
+	mergeToolStreamedOutput,
 	normalizeRuntimeConfig,
 	resolveCredentialError,
 } from "@/hooks/chat-session/helpers";
@@ -27,6 +28,7 @@ import type {
 	ToolApprovalRequestItem,
 	ToolCallEndEvent,
 	ToolCallStartEvent,
+	ToolCallUpdateEvent,
 } from "@/hooks/chat-session/types";
 import {
 	type ChatMessage,
@@ -65,6 +67,7 @@ const RELEVANT_STREAMS = new Set([
 	"chat_reasoning",
 	"chat_queued_prompt_start",
 	"chat_tool_call_start",
+	"chat_tool_call_update",
 	"chat_tool_call_end",
 	"chat_core_log",
 	"chat_usage",
@@ -243,6 +246,9 @@ export function useChatSession() {
 	const promptsInQueueRef = useRef<PromptInQueue[]>([]);
 	const liveToolMessageIdsRef = useRef<Record<string, string>>({});
 	const liveToolInputsRef = useRef<Record<string, unknown>>({});
+	// Output streamed via chat_tool_call_update, kept per tool call so
+	// chat_tool_call_end can fall back to it when it carries no final output.
+	const liveToolOutputsRef = useRef<Record<string, unknown>>({});
 	const activeSessionIdRef = useRef<string | null>(null);
 	const activeAssistantMessageIdRef = useRef<string | null>(null);
 	const lastStreamIndexBySessionRef = useRef<Record<string, number>>({});
@@ -290,6 +296,7 @@ export function useChatSession() {
 	const clearLiveToolRefs = useCallback(() => {
 		liveToolMessageIdsRef.current = {};
 		liveToolInputsRef.current = {};
+		liveToolOutputsRef.current = {};
 	}, []);
 
 	const resetStreamDedupe = useCallback((targetSessionId?: string | null) => {
@@ -945,6 +952,7 @@ export function useChatSession() {
 				const messageId = makeId("tool");
 				liveToolMessageIdsRef.current[toolCallId] = messageId;
 				liveToolInputsRef.current[toolCallId] = parsed.input;
+				delete liveToolOutputsRef.current[toolCallId];
 				// Reset so text after this tool call gets a fresh assistant message
 				activeAssistantMessageIdRef.current = null;
 				setActiveAssistantMessageId(null);
@@ -964,6 +972,50 @@ export function useChatSession() {
 				return;
 			}
 
+			// --- Tool call update (streamed partial output) ---
+			if (payload.stream === "chat_tool_call_update") {
+				let parsed: ToolCallUpdateEvent = {};
+				try {
+					parsed = JSON.parse(payload.chunk) as ToolCallUpdateEvent;
+				} catch {
+					return;
+				}
+				const toolCallId = parsed.toolCallId;
+				if (!toolCallId) {
+					return;
+				}
+				const messageId = liveToolMessageIdsRef.current[toolCallId];
+				if (!messageId) {
+					// Unmatched updates belong to a tool call from a previous turn.
+					return;
+				}
+				const mergedOutput = mergeToolStreamedOutput(
+					liveToolOutputsRef.current[toolCallId],
+					parsed.update,
+				);
+				liveToolOutputsRef.current[toolCallId] = mergedOutput;
+				const toolInput = liveToolInputsRef.current[toolCallId];
+				// hookEventName stays "tool_call_start": the call is still running, and
+				// buildToolPresentation() relies on that marker to keep the spinner up
+				// even though the payload now carries a non-null result.
+				setMessages((prev) =>
+					updateMessageById(prev, messageId, (msg) => {
+						const toolName =
+							parsed.toolName ?? msg.meta?.toolName ?? "unknown_tool";
+						return {
+							...msg,
+							content: buildToolPayloadString({
+								toolName,
+								input: toolInput,
+								output: mergedOutput,
+							}),
+							meta: { ...msg.meta, toolName, hookEventName: "tool_call_start" },
+						};
+					}),
+				);
+				return;
+			}
+
 			// --- Tool call end ---
 			let parsed: ToolCallEndEvent = {};
 			try {
@@ -979,15 +1031,24 @@ export function useChatSession() {
 			const toolInput =
 				parsed.input ??
 				(toolCallId ? liveToolInputsRef.current[toolCallId] : undefined);
+			// Tools that stream their output through chat_tool_call_update may finish
+			// without repeating it in `output`. Overwriting with the absent value
+			// would both erase the streamed text and make buildToolPresentation()
+			// read the null result as "still running", so keep what was streamed.
+			const streamedOutput = toolCallId
+				? liveToolOutputsRef.current[toolCallId]
+				: undefined;
+			const toolOutput = parsed.output ?? streamedOutput;
 			const toolPayload = buildToolPayloadString({
 				toolName,
 				input: toolInput,
-				output: parsed.output,
+				output: toolOutput,
 				error: parsed.error,
 			});
 			if (toolCallId) {
 				delete liveToolMessageIdsRef.current[toolCallId];
 				delete liveToolInputsRef.current[toolCallId];
+				delete liveToolOutputsRef.current[toolCallId];
 			}
 			if (messageId) {
 				// Single setMessages call replaces content + updates meta together.

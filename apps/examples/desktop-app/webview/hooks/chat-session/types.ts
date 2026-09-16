@@ -27,6 +27,12 @@ export type ToolCallStartEvent = {
 	input?: unknown;
 };
 
+export type ToolCallUpdateEvent = {
+	toolCallId?: string;
+	toolName?: string;
+	update?: unknown;
+};
+
 export type ToolCallEndEvent = {
 	toolCallId?: string;
 	toolName?: string;

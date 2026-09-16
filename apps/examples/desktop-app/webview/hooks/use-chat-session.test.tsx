@@ -31,6 +31,95 @@ function HookHarness() {
 	return null;
 }
 
+function getChatEventHandler(): ((payload: unknown) => void) | undefined {
+	const calls = subscribeMock.mock.calls as unknown as Array<
+		[string, (payload: unknown) => void]
+	>;
+	return calls.find((call) => call[0] === "chat_event")?.[1];
+}
+
+/** A session whose send() resolves without a turn result, so only the streamed
+ * tool-call events drive the transcript. */
+function mockToolStreamingSession(): void {
+	invokeMock.mockImplementation(
+		async (command: string, args?: Record<string, unknown>) => {
+			if (command === "get_process_context") {
+				return { cwd: "/workspace/cline", workspaceRoot: "/workspace/cline" };
+			}
+			if (command === "chat_session_command") {
+				const request = args?.request as
+					| { action?: string; config?: { sessionId?: string } }
+					| undefined;
+				if (request?.action === "start") {
+					return { sessionId: request.config?.sessionId };
+				}
+				if (request?.action === "send") {
+					return { ok: true };
+				}
+			}
+			return [];
+		},
+	);
+}
+
+function chatEvent(stream: string, chunk: unknown, index: number) {
+	return {
+		sessionId: current.sessionId,
+		stream,
+		chunk: JSON.stringify(chunk),
+		ts: Date.now(),
+		index,
+	};
+}
+
+function toolCallStartEvent(options: { toolCallId: string; index: number }) {
+	return chatEvent(
+		"chat_tool_call_start",
+		{
+			toolCallId: options.toolCallId,
+			toolName: "run_commands",
+			input: { commands: ["bun run build"] },
+		},
+		options.index,
+	);
+}
+
+function toolCallUpdateEvent(options: {
+	toolCallId: string;
+	update: unknown;
+	index: number;
+}) {
+	return chatEvent(
+		"chat_tool_call_update",
+		{
+			toolCallId: options.toolCallId,
+			toolName: "run_commands",
+			update: options.update,
+		},
+		options.index,
+	);
+}
+
+function toolCallEndEvent(options: {
+	toolCallId: string;
+	index: number;
+	output?: unknown;
+	error?: string;
+	durationMs?: number;
+}) {
+	return chatEvent(
+		"chat_tool_call_end",
+		{
+			toolCallId: options.toolCallId,
+			toolName: "run_commands",
+			output: options.output,
+			error: options.error,
+			durationMs: options.durationMs,
+		},
+		options.index,
+	);
+}
+
 beforeEach(async () => {
 	Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 	window.localStorage.clear();
@@ -663,6 +752,173 @@ describe("useChatSession", () => {
 			});
 		});
 		expect(current.status).toBe("completed");
+	});
+
+	it("keeps output streamed via chat_tool_call_update when the tool ends without a final output", async () => {
+		mockToolStreamingSession();
+
+		await act(async () => {
+			await current.sendPrompt("Run the build");
+		});
+		const chatEventHandler = getChatEventHandler();
+		expect(chatEventHandler).toBeDefined();
+
+		await act(async () => {
+			chatEventHandler?.(
+				toolCallStartEvent({ toolCallId: "call-1", index: 1 }),
+			);
+		});
+
+		const toolMessageId = current.messages.find(
+			(message) => message.role === "tool",
+		)?.id;
+		expect(toolMessageId).toBeDefined();
+
+		// The tool streams its stdout in chunks while it runs.
+		await act(async () => {
+			chatEventHandler?.(
+				toolCallUpdateEvent({
+					toolCallId: "call-1",
+					update: { stream: "stdout", chunk: "compiling...\n" },
+					index: 2,
+				}),
+			);
+			chatEventHandler?.(
+				toolCallUpdateEvent({
+					toolCallId: "call-1",
+					update: { stream: "stdout", chunk: "done\n" },
+					index: 3,
+				}),
+			);
+		});
+
+		const streaming = current.messages.find(
+			(message) => message.id === toolMessageId,
+		);
+		expect(JSON.parse(streaming?.content ?? "{}")).toMatchObject({
+			toolName: "run_commands",
+			input: { commands: ["bun run build"] },
+			result: "compiling...\ndone\n",
+			isError: false,
+		});
+		// Still running, so the spinner must stay up despite a non-null result.
+		expect(streaming?.meta?.hookEventName).toBe("tool_call_start");
+
+		// The runtime finishes the call without repeating the output.
+		await act(async () => {
+			chatEventHandler?.(
+				toolCallEndEvent({ toolCallId: "call-1", index: 4, durationMs: 12 }),
+			);
+		});
+
+		const completed = current.messages.find(
+			(message) => message.id === toolMessageId,
+		);
+		expect(JSON.parse(completed?.content ?? "{}")).toMatchObject({
+			toolName: "run_commands",
+			result: "compiling...\ndone\n",
+			isError: false,
+		});
+		// A non-null result plus tool_call_end is what stops the spinner.
+		expect(completed?.meta?.hookEventName).toBe("tool_call_end");
+	});
+
+	it("lets a final chat_tool_call_end output replace the streamed output", async () => {
+		mockToolStreamingSession();
+
+		await act(async () => {
+			await current.sendPrompt("Run the build");
+		});
+		const chatEventHandler = getChatEventHandler();
+
+		await act(async () => {
+			chatEventHandler?.(
+				toolCallStartEvent({ toolCallId: "call-1", index: 1 }),
+			);
+			chatEventHandler?.(
+				toolCallUpdateEvent({
+					toolCallId: "call-1",
+					update: "partial",
+					index: 2,
+				}),
+			);
+			chatEventHandler?.(
+				toolCallEndEvent({
+					toolCallId: "call-1",
+					output: "final output",
+					index: 3,
+				}),
+			);
+		});
+
+		const completed = current.messages.find(
+			(message) => message.role === "tool",
+		);
+		expect(JSON.parse(completed?.content ?? "{}")).toMatchObject({
+			result: "final output",
+			isError: false,
+		});
+		expect(completed?.meta?.hookEventName).toBe("tool_call_end");
+	});
+
+	it("reports a tool error even when output was streamed first", async () => {
+		mockToolStreamingSession();
+
+		await act(async () => {
+			await current.sendPrompt("Run the build");
+		});
+		const chatEventHandler = getChatEventHandler();
+
+		await act(async () => {
+			chatEventHandler?.(
+				toolCallStartEvent({ toolCallId: "call-1", index: 1 }),
+			);
+			chatEventHandler?.(
+				toolCallUpdateEvent({
+					toolCallId: "call-1",
+					update: { stream: "stderr", chunk: "boom\n" },
+					index: 2,
+				}),
+			);
+			chatEventHandler?.(
+				toolCallEndEvent({
+					toolCallId: "call-1",
+					error: "command failed",
+					index: 3,
+				}),
+			);
+		});
+
+		const completed = current.messages.find(
+			(message) => message.role === "tool",
+		);
+		expect(JSON.parse(completed?.content ?? "{}")).toMatchObject({
+			result: "command failed",
+			isError: true,
+		});
+	});
+
+	it("ignores chat_tool_call_update events with no matching live tool call", async () => {
+		mockToolStreamingSession();
+
+		await act(async () => {
+			await current.sendPrompt("Run the build");
+		});
+		const chatEventHandler = getChatEventHandler();
+
+		await act(async () => {
+			chatEventHandler?.(
+				toolCallUpdateEvent({
+					toolCallId: "stale-call",
+					update: { stream: "stdout", chunk: "orphan\n" },
+					index: 1,
+				}),
+			);
+		});
+
+		expect(current.messages.some((message) => message.role === "tool")).toBe(
+			false,
+		);
 	});
 
 	it("marks a queued turn as failed when chat_done reports an error", async () => {

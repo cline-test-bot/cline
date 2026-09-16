@@ -112,6 +112,44 @@ export function buildToolPayloadString(options: {
 	});
 }
 
+/**
+ * Pull the textual delta out of a `chat_tool_call_update` payload.
+ *
+ * Tools stream progress through `AgentToolContext.emitUpdate`, so the payload
+ * shape is whatever the tool passed: a bare string, or a record carrying a
+ * `chunk` (the shape used by streaming command/terminal tools). Anything else
+ * is a structured progress snapshot rather than a delta.
+ */
+function extractToolUpdateChunk(update: unknown): string | undefined {
+	if (typeof update === "string") {
+		return update;
+	}
+	if (!update || typeof update !== "object" || Array.isArray(update)) {
+		return undefined;
+	}
+	const chunk = (update as { chunk?: unknown }).chunk;
+	return typeof chunk === "string" ? chunk : undefined;
+}
+
+/**
+ * Fold one streamed tool update into the output accumulated so far.
+ *
+ * Textual deltas append, because each update carries only the newly produced
+ * bytes. Structured payloads replace: they are full snapshots (e.g. sub-agent
+ * progress counters), so concatenating them would be meaningless.
+ */
+export function mergeToolStreamedOutput(
+	previous: unknown,
+	update: unknown,
+): unknown {
+	const chunk = extractToolUpdateChunk(update);
+	if (chunk === undefined) {
+		return update === undefined ? previous : update;
+	}
+	const previousText = typeof previous === "string" ? previous : "";
+	return `${previousText}${chunk}`;
+}
+
 export function normalizeRuntimeConfig(
 	config: ChatSessionConfig,
 ): ChatSessionConfig {
