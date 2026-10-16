@@ -1,6 +1,9 @@
 "use client";
 
-import { CLINE_DEFAULT_MODEL_ID } from "@cline/shared/browser";
+import {
+	ANTHROPIC_DEFAULT_MODEL_ID,
+	CLINE_DEFAULT_MODEL_ID,
+} from "@cline/shared/browser";
 import {
 	ArrowUp,
 	Brain,
@@ -79,17 +82,19 @@ const BUILTIN_SLASH_COMMANDS: SlashCommand[] = [
 
 const FALLBACK_PROVIDER_MODELS: Record<string, string[]> = {
 	cline: [CLINE_DEFAULT_MODEL_ID],
-	anthropic: ["claude-sonnet-4-6"],
+	// Anthropic's own API expects bare ids, so use the Anthropic-format
+	// equivalent of CLINE_DEFAULT_MODEL_ID rather than the prefixed id.
+	anthropic: [ANTHROPIC_DEFAULT_MODEL_ID],
 	"openai-native": ["gpt-5.5"],
-	openrouter: ["anthropic/claude-sonnet-4.6"],
+	openrouter: [CLINE_DEFAULT_MODEL_ID],
 	gemini: ["gemini-3-pro-latest"],
 };
 
 const FALLBACK_PROVIDER_REASONING_MODELS: Record<string, string[]> = {
 	cline: [CLINE_DEFAULT_MODEL_ID],
-	anthropic: ["claude-sonnet-4-6"],
+	anthropic: [ANTHROPIC_DEFAULT_MODEL_ID],
 	"openai-native": ["gpt-5.5"],
-	openrouter: ["anthropic/claude-sonnet-4.6"],
+	openrouter: [CLINE_DEFAULT_MODEL_ID],
 	gemini: ["gemini-3-pro-latest"],
 };
 

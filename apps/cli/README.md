@@ -247,7 +247,7 @@ Schedules can route results back to chat surfaces with `--delivery-adapter`, `--
 |------|-------------|
 | `-s, --system <prompt>` | Override the system prompt |
 | `-P, --provider <id>` | Provider id (default: `cline`) |
-| `-m, --model <id>` | Model id (default: `anthropic/claude-sonnet-4.6`) |
+| `-m, --model <id>` | Model id (default: `anthropic/claude-sonnet-5.5`) |
 | `-k, --key <api-key>` | API key override for this run |
 | `-p, --plan` | Run in plan mode (default is act mode) |
 | `-i, --tui` | Interactive TUI multi-turn mode |

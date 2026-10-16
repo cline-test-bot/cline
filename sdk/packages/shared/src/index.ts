@@ -276,7 +276,10 @@ export {
 	stripModeNotices,
 	xmlTagsRemoval,
 } from "./prompt/format";
-export { CLINE_DEFAULT_MODEL_ID } from "./providers/defaults";
+export {
+	ANTHROPIC_DEFAULT_MODEL_ID,
+	CLINE_DEFAULT_MODEL_ID,
+} from "./providers/defaults";
 export { isClineProvider } from "./providers/utils";
 export {
 	buildRemoteConfigSessionBlobUploadMetadata,

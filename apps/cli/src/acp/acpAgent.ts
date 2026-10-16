@@ -28,7 +28,7 @@ import {
 	ProviderSettingsManager,
 	SessionSource,
 } from "@cline/core";
-import type { Message } from "@cline/shared";
+import { CLINE_DEFAULT_MODEL_ID, type Message } from "@cline/shared";
 import { getPersistedProviderApiKey } from "../commands/auth";
 import { resolveSystemPrompt } from "../runtime/prompt";
 import { subscribeToAgentEvents } from "../runtime/session-events";
@@ -129,8 +129,7 @@ export class AcpAgent implements Agent {
 		const defaultMode = "act";
 		const providerId =
 			process.env.CLINE_PROVIDER ?? this.authResult?.providerId ?? "cline";
-		const defaultModelId =
-			process.env.CLINE_MODEL ?? "anthropic/claude-sonnet-4.6";
+		const defaultModelId = process.env.CLINE_MODEL ?? CLINE_DEFAULT_MODEL_ID;
 
 		this.sessions.set(sessionId, {
 			id: sessionId,

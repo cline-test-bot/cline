@@ -1,4 +1,5 @@
 import {
+	ANTHROPIC_DEFAULT_MODEL_ID,
 	CLINE_DEFAULT_MODEL_ID,
 	type GatewayModelCapability,
 	type GatewayModelDefinition,
@@ -888,7 +889,7 @@ const OPENAI_COMPATIBLE_SPEC_OVERRIDES: BuiltinSpecOverride[] = [
 		family: "openai-compatible",
 		popular: 20,
 		capabilities: ["reasoning", "prompt-cache"],
-		defaultModelId: "anthropic/claude-sonnet-4.6",
+		defaultModelId: CLINE_DEFAULT_MODEL_ID,
 		apiKeyEnv: ["OPENROUTER_API_KEY"],
 		modelsProviderId: "openrouter",
 		docsUrl: "https://openrouter.ai/models",
@@ -1003,7 +1004,11 @@ const BUILTIN_SPEC_OVERRIDES: BuiltinSpecOverride[] = [
 		family: "anthropic",
 		popular: 15,
 		capabilities: ["reasoning", "prompt-cache"],
-		defaultModelId: "claude-sonnet-5",
+		// Anthropic's first-party API uses bare, dash-separated model ids
+		// (`claude-sonnet-5-5`) while gateways use the prefixed, dotted form
+		// (`anthropic/claude-sonnet-5.5`). Keep this in sync with
+		// CLINE_DEFAULT_MODEL_ID — it is the same model in Anthropic format.
+		defaultModelId: ANTHROPIC_DEFAULT_MODEL_ID,
 		apiKeyEnv: ["ANTHROPIC_API_KEY"],
 		modelsProviderId: "anthropic",
 		defaults: { baseUrl: "https://api.anthropic.com/v1" },

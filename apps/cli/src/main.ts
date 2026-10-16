@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { basename } from "node:path";
 import type { ToolPolicy } from "@cline/core";
 
-import { registerDisposable } from "@cline/shared";
+import { CLINE_DEFAULT_MODEL_ID, registerDisposable } from "@cline/shared";
 import type { Command } from "commander";
 import {
 	CommanderError,
@@ -1118,7 +1118,7 @@ export async function runCli(): Promise<void> {
 				args.model ??
 				selectedProviderSettings?.model ??
 				knownModelIds[0] ??
-				"anthropic/claude-sonnet-4.6",
+				CLINE_DEFAULT_MODEL_ID,
 			apiKey: apiKey ?? "",
 			knownModels,
 			systemPrompt: await resolveSystemPrompt({
